@@ -57,15 +57,18 @@ jobs:
             version="$(
               timeout 15s docker run --rm --entrypoint sh "${UPSTREAM_IMAGE}" -lc '
                 set -eu
-                for c in "zerotier-one -v" "/usr/sbin/zerotier-one -v" "zerotier-one --version"; do
-                  bin="${c%% *}"
-                  if command -v "$bin" >/dev/null 2>&1; then
-                    $c 2>&1 | head -n 1
+
+                # Some images ship `zerotier-one` outside of PATH (e.g. /usr/sbin),
+                # and `command -v` is not reliable for absolute paths across shells.
+                for bin in "zerotier-one" "/usr/sbin/zerotier-one" "/usr/local/sbin/zerotier-one"; do
+                  if command -v "${bin}" >/dev/null 2>&1 || [ -x "${bin}" ]; then
+                    "${bin}" -v 2>&1 | head -n 1
                     exit 0
                   fi
                 done
+
                 exit 1
-              ' 2>/dev/null || true
+              ' 2>&1 || true
             )"
             version="$(printf '%s' "${version}" | grep -Eo '[0-9]+\\.[0-9]+\\.[0-9]+' | head -n 1 || true)"
           fi
@@ -150,7 +153,7 @@ jobs:
 
       - name: Pull built image locally
         if: steps.meta.outputs.should_release == 'true'
-        run: docker pull ghcr.io/${{ github.repository_owner }}/zerotier-mikrotik:${{ steps.meta.outputs.tag }}
+        run: docker pull --platform linux/arm64 ghcr.io/${{ github.repository_owner }}/zerotier-mikrotik:${{ steps.meta.outputs.tag }}
 
       - name: Export RouterOS-friendly archive (docker-archive)
         if: steps.meta.outputs.should_release == 'true'
