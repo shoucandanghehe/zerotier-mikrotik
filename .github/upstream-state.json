@@ -1,8 +1,8 @@
 {
   "upstream_image": "zerotier/zerotier:latest",
-  "upstream_digest": "",
-  "upstream_version": "",
-  "revision": 0,
-  "last_release_tag": "",
-  "updated_at": ""
+  "upstream_digest": "sha256:4d0542fa43f4ffaac4e702eb89d3ba6c6c4e6736fdd253b1249cae1a54e8ff97",
+  "upstream_version": "1.14.2",
+  "revision": 1,
+  "last_release_tag": "1.14.2-r1",
+  "updated_at": "2026-03-10T03:20:07Z"
 }
