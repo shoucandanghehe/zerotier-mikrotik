@@ -65,12 +65,12 @@ jobs:
               "/bin/zerotier-one" \
               "/zerotier-one"; do
               out="$(timeout 15s docker run --rm --entrypoint "${ep}" "${UPSTREAM_IMAGE}" -v 2>&1 || true)"
-              version="$(printf '%s' "${out}" | grep -Eo '[0-9]+\\.[0-9]+\\.[0-9]+' | head -n 1 || true)"
+              version="$(printf '%s' "${out}" | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' | head -n 1 || true)"
               if [[ -n "${version}" ]]; then
                 break
               fi
               out="$(timeout 15s docker run --rm --entrypoint "${ep}" "${UPSTREAM_IMAGE}" --version 2>&1 || true)"
-              version="$(printf '%s' "${out}" | grep -Eo '[0-9]+\\.[0-9]+\\.[0-9]+' | head -n 1 || true)"
+              version="$(printf '%s' "${out}" | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' | head -n 1 || true)"
               if [[ -n "${version}" ]]; then
                 break
               fi
@@ -82,7 +82,7 @@ jobs:
             version="$(
               skopeo inspect --override-os linux --override-arch arm64 "docker://${UPSTREAM_IMAGE}" 2>/dev/null \
                 | jq -r '.Labels["org.opencontainers.image.version"] // .Labels["org.label-schema.version"] // empty' 2>/dev/null \
-                | grep -Eo '[0-9]+\\.[0-9]+\\.[0-9]+' \
+                | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' \
                 | head -n 1 || true
             )"
           fi
@@ -99,7 +99,7 @@ jobs:
                     p && $0 ~ /^Version: / {print $2; exit}
                     p && $0 == "" {p=0}
                   ' "${tmp_dir}/status" \
-                    | grep -Eo '[0-9]+\\.[0-9]+\\.[0-9]+' \
+                    | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' \
                     | head -n 1 || true
                 )"
               fi
