@@ -8,6 +8,7 @@ on:
     branches: [main]
     paths:
       - Dockerfile
+      - .github/scripts/**
       - .github/workflows/build.yaml
 
 permissions:
@@ -31,139 +32,19 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
-      - name: Install tools (skopeo, jq)
+      - name: Install skopeo
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y skopeo jq
+          sudo apt-get install -y skopeo
 
       - name: Resolve upstream + compute release tag
         id: meta
         env:
           UPSTREAM_IMAGE: zerotier/zerotier:latest
           STATE_FILE: .github/upstream-state.json
-        run: |
-          set -euo pipefail
+        run: python .github/scripts/resolve_meta.py
 
-          docker pull "${UPSTREAM_IMAGE}"
-
-          upstream_repo_digest="$(docker image inspect --format '{{index .RepoDigests 0}}' "${UPSTREAM_IMAGE}")"
-          upstream_digest="${upstream_repo_digest#*@}"
-
-          version="$(
-            docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' "${UPSTREAM_IMAGE}" 2>/dev/null || true
-          )"
-          if [[ -z "${version}" ]]; then
-            # Avoid relying on a shell existing in the upstream image; probe common binary paths directly.
-            for ep in \
-              "zerotier-one" \
-              "/usr/sbin/zerotier-one" \
-              "/usr/local/sbin/zerotier-one" \
-              "/usr/bin/zerotier-one" \
-              "/usr/local/bin/zerotier-one" \
-              "/sbin/zerotier-one" \
-              "/bin/zerotier-one" \
-              "/zerotier-one"; do
-              out="$(timeout 15s docker run --rm --entrypoint "${ep}" "${UPSTREAM_IMAGE}" -v 2>&1 || true)"
-              version="$(printf '%s' "${out}" | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' | head -n 1 || true)"
-              if [[ -n "${version}" ]]; then
-                break
-              fi
-              out="$(timeout 15s docker run --rm --entrypoint "${ep}" "${UPSTREAM_IMAGE}" --version 2>&1 || true)"
-              version="$(printf '%s' "${out}" | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' | head -n 1 || true)"
-              if [[ -n "${version}" ]]; then
-                break
-              fi
-            done
-          fi
-
-          if [[ -z "${version}" ]]; then
-            # Last resort: try reading labels/metadata without executing the container.
-            version="$(
-              skopeo inspect --override-os linux --override-arch arm64 "docker://${UPSTREAM_IMAGE}" 2>/dev/null \
-                | jq -r '.Labels["org.opencontainers.image.version"] // .Labels["org.label-schema.version"] // empty' 2>/dev/null \
-                | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' \
-                | head -n 1 || true
-            )"
-          fi
-
-          if [[ -z "${version}" ]]; then
-            # Final fallback: extract the package version from the filesystem without executing anything.
-            cid="$(docker create "${UPSTREAM_IMAGE}" 2>/dev/null || true)"
-            if [[ -n "${cid}" ]]; then
-              tmp_dir="$(mktemp -d)"
-              if docker cp "${cid}:/var/lib/dpkg/status" "${tmp_dir}/status" 2>/dev/null; then
-                version="$(
-                  awk '
-                    $0 ~ /^Package: zerotier-one$/ {p=1; next}
-                    p && $0 ~ /^Version: / {print $2; exit}
-                    p && $0 == "" {p=0}
-                  ' "${tmp_dir}/status" \
-                    | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' \
-                    | head -n 1 || true
-                )"
-              fi
-              rm -rf "${tmp_dir}"
-              docker rm "${cid}" >/dev/null 2>&1 || true
-            fi
-          fi
-
-          if [[ -z "${version}" ]]; then
-            echo "Failed to detect upstream ZeroTier version from ${UPSTREAM_IMAGE}." >&2
-            echo "Upstream labels: $(docker image inspect --format '{{json .Config.Labels}}' "${UPSTREAM_IMAGE}" 2>/dev/null || true)" >&2
-            exit 1
-          fi
-
-          old_version="$(jq -r '.upstream_version // ""' "${STATE_FILE}" 2>/dev/null || echo "")"
-          old_digest="$(jq -r '.upstream_digest // ""' "${STATE_FILE}" 2>/dev/null || echo "")"
-          old_rev="$(jq -r '.revision // 0' "${STATE_FILE}" 2>/dev/null || echo "0")"
-          if [[ "${old_rev}" == "null" || -z "${old_rev}" ]]; then old_rev=0; fi
-
-          should_release="true"
-          if [[ "${GITHUB_EVENT_NAME}" == "schedule" && "${upstream_digest}" == "${old_digest}" && "${version}" == "${old_version}" ]]; then
-            should_release="false"
-          fi
-
-          if [[ "${should_release}" == "true" ]]; then
-            if [[ "${version}" == "${old_version}" && -n "${old_version}" ]]; then
-              rev="$((old_rev + 1))"
-            else
-              rev="1"
-            fi
-            tag="${version}-r${rev}"
-
-            updated_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-            tmp="$(mktemp)"
-            jq -n \
-              --arg upstream_image "${UPSTREAM_IMAGE}" \
-              --arg upstream_digest "${upstream_digest}" \
-              --arg upstream_version "${version}" \
-              --arg last_release_tag "${tag}" \
-              --arg updated_at "${updated_at}" \
-              --argjson revision "${rev}" \
-              '{upstream_image:$upstream_image,upstream_digest:$upstream_digest,upstream_version:$upstream_version,revision:$revision,last_release_tag:$last_release_tag,updated_at:$updated_at}' \
-              > "${tmp}"
-            mv "${tmp}" "${STATE_FILE}"
-
-            git config user.name "github-actions[bot]"
-            git config user.email "github-actions[bot]@users.noreply.github.com"
-            git add "${STATE_FILE}"
-            git commit -m "chore(release): ${tag}"
-            git push origin "HEAD:${GITHUB_REF_NAME}"
-
-            commit_sha="$(git rev-parse HEAD)"
-          else
-            tag=""
-            rev=""
-            commit_sha="$(git rev-parse HEAD)"
-          fi
-
-          echo "should_release=${should_release}" >> "$GITHUB_OUTPUT"
-          echo "upstream_digest=${upstream_digest}" >> "$GITHUB_OUTPUT"
-          echo "upstream_version=${version}" >> "$GITHUB_OUTPUT"
-          echo "revision=${rev}" >> "$GITHUB_OUTPUT"
-          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
-          echo "commit_sha=${commit_sha}" >> "$GITHUB_OUTPUT"
 
       - name: Log in to GHCR
         if: steps.meta.outputs.should_release == 'true'
