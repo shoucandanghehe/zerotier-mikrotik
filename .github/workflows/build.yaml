@@ -22,14 +22,145 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  build:
-    runs-on: ubuntu-24.04-arm
+  meta:
+    runs-on: ubuntu-24.04
+
+    outputs:
+      should_release: ${{ steps.meta.outputs.should_release }}
+      upstream_digest: ${{ steps.meta.outputs.upstream_digest }}
+      upstream_version: ${{ steps.meta.outputs.upstream_version }}
+      tag: ${{ steps.meta.outputs.tag }}
+      commit_sha: ${{ steps.meta.outputs.commit_sha }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
+
+      - name: Resolve upstream + compute release tag
+        id: meta
+        env:
+          UPSTREAM_IMAGE: zerotier/zerotier:latest
+          STATE_FILE: .github/upstream-state.json
+        run: python .github/scripts/resolve_meta.py
+
+  build-amd64:
+    needs: meta
+    if: needs.meta.outputs.should_release == 'true'
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout release commit
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.meta.outputs.commit_sha }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build amd64 image natively
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64
+          pull: true
+          push: true
+          build-args: |
+            ZT_UPSTREAM=zerotier/zerotier@${{ needs.meta.outputs.upstream_digest }}
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/zerotier-mikrotik:${{ needs.meta.outputs.tag }}-amd64
+
+  build-arm64:
+    needs: meta
+    if: needs.meta.outputs.should_release == 'true'
+    runs-on: ubuntu-24.04-arm
+
+    steps:
+      - name: Checkout release commit
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.meta.outputs.commit_sha }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build arm64 image natively
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/arm64
+          pull: true
+          push: true
+          build-args: |
+            ZT_UPSTREAM=zerotier/zerotier@${{ needs.meta.outputs.upstream_digest }}
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/zerotier-mikrotik:${{ needs.meta.outputs.tag }}-arm64
+
+  build-armv7:
+    needs: meta
+    if: needs.meta.outputs.should_release == 'true'
+    runs-on: ubuntu-24.04-arm
+
+    steps:
+      - name: Checkout release commit
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.meta.outputs.commit_sha }}
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build armv7 image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/arm/v7
+          pull: true
+          push: true
+          build-args: |
+            ZT_UPSTREAM=zerotier/zerotier@${{ needs.meta.outputs.upstream_digest }}
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/zerotier-mikrotik:${{ needs.meta.outputs.tag }}-armv7
+
+  release:
+    needs:
+      - meta
+      - build-amd64
+      - build-arm64
+      - build-armv7
+    if: needs.meta.outputs.should_release == 'true'
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout release commit
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.meta.outputs.commit_sha }}
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -40,73 +171,80 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y skopeo
 
-      - name: Resolve upstream + compute release tag
-        id: meta
-        env:
-          UPSTREAM_IMAGE: zerotier/zerotier:latest
-          STATE_FILE: .github/upstream-state.json
-        run: python .github/scripts/resolve_meta.py
-
-
       - name: Log in to GHCR
-        if: steps.meta.outputs.should_release == 'true'
         uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build image
-        if: steps.meta.outputs.should_release == 'true'
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          platforms: linux/arm64
-          pull: true
-          push: true
-          build-args: |
-            ZT_UPSTREAM=zerotier/zerotier@${{ steps.meta.outputs.upstream_digest }}
-          tags: |
-            ghcr.io/${{ github.repository_owner }}/zerotier-mikrotik:${{ steps.meta.outputs.tag }}
-            ghcr.io/${{ github.repository_owner }}/zerotier-mikrotik:latest
-
-      - name: Pull built image locally
-        if: steps.meta.outputs.should_release == 'true'
-        run: docker pull --platform linux/arm64 ghcr.io/${{ github.repository_owner }}/zerotier-mikrotik:${{ steps.meta.outputs.tag }}
-
-      - name: Export RouterOS-friendly archive (docker-archive)
-        if: steps.meta.outputs.should_release == 'true'
-        id: export
-        env:
-          SRC_IMAGE: ghcr.io/${{ github.repository_owner }}/zerotier-mikrotik:${{ steps.meta.outputs.tag }}
-          ARCHIVE_REF: zerotier-mikrotik:${{ steps.meta.outputs.tag }}
+      - name: Create multi-arch manifest
         run: |
           set -euo pipefail
-          tar_path="zerotier-mikrotik-${{ steps.meta.outputs.tag }}-arm64.tar"
-          skopeo copy \
-            --override-os linux \
-            --override-arch arm64 \
-            "docker-daemon:${SRC_IMAGE}" \
-            "docker-archive:${tar_path}:${ARCHIVE_REF}"
-          sha_path="${tar_path}.sha256"
-          sha256sum "${tar_path}" > "${sha_path}"
-          echo "tar_path=${tar_path}" >> "$GITHUB_OUTPUT"
-          echo "sha_path=${sha_path}" >> "$GITHUB_OUTPUT"
+          image="ghcr.io/${{ github.repository_owner }}/zerotier-mikrotik"
+          tag="${{ needs.meta.outputs.tag }}"
+
+          docker buildx imagetools create \
+            -t "${image}:${tag}" \
+            -t "${image}:latest" \
+            "${image}:${tag}-amd64" \
+            "${image}:${tag}-arm64" \
+            "${image}:${tag}-armv7"
+
+          docker buildx imagetools inspect "${image}:${tag}"
+
+      - name: Export RouterOS-friendly archives
+        env:
+          SRC_IMAGE: ghcr.io/${{ github.repository_owner }}/zerotier-mikrotik:${{ needs.meta.outputs.tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+
+          while IFS='|' read -r archive_suffix arch variant ros_arch; do
+            tar_path="release-assets/zerotier-mikrotik-${{ needs.meta.outputs.tag }}-${archive_suffix}.tar"
+            archive_ref="zerotier-mikrotik:${{ needs.meta.outputs.tag }}"
+
+            args=(
+              copy
+              --override-os linux
+              --override-arch "${arch}"
+            )
+
+            if [[ -n "${variant}" ]]; then
+              args+=(--override-variant "${variant}")
+            fi
+
+            args+=(
+              "docker://${SRC_IMAGE}"
+              "docker-archive:${tar_path}:${archive_ref}"
+            )
+
+            skopeo "${args[@]}"
+            sha256sum "${tar_path}" > "${tar_path}.sha256"
+            echo "Exported ${tar_path} for RouterOS ${ros_arch}"
+          done <<'EOF'
+          amd64|amd64||x86
+          arm64|arm64||arm64
+          armv7|arm|v7|arm
+          EOF
 
       - name: Create GitHub release
-        if: steps.meta.outputs.should_release == 'true'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.meta.outputs.tag }}
-          target_commitish: ${{ steps.meta.outputs.commit_sha }}
-          name: ${{ steps.meta.outputs.tag }}
+          tag_name: ${{ needs.meta.outputs.tag }}
+          target_commitish: ${{ needs.meta.outputs.commit_sha }}
+          name: ${{ needs.meta.outputs.tag }}
           body: |
-            Upstream: `${{ steps.meta.outputs.upstream_version }}` (`${{ steps.meta.outputs.upstream_digest }}`)
+            Upstream: `${{ needs.meta.outputs.upstream_version }}` (`${{ needs.meta.outputs.upstream_digest }}`)
+
+            RouterOS-compatible archives:
+            - `zerotier-mikrotik-${{ needs.meta.outputs.tag }}-amd64.tar` for RouterOS `x86`
+            - `zerotier-mikrotik-${{ needs.meta.outputs.tag }}-arm64.tar` for RouterOS `arm64`
+            - `zerotier-mikrotik-${{ needs.meta.outputs.tag }}-armv7.tar` for RouterOS `arm`
 
             RouterOS import (example):
-            - Upload `${{ steps.export.outputs.tar_path }}` to RouterOS storage (e.g. `disk1/`)
-            - `/container/add file=disk1/${{ steps.export.outputs.tar_path }} interface=veth1 root-dir=disk1/zerotier name=zerotier logging=yes`
+            - Upload the archive matching your device architecture to RouterOS storage (e.g. `disk1/`)
+            - `/container/add file=disk1/zerotier-mikrotik-${{ needs.meta.outputs.tag }}-arm64.tar interface=veth1 root-dir=disk1/zerotier name=zerotier logging=yes`
             - `/container/start 0` (adjust container ID)
           files: |
-            ${{ steps.export.outputs.tar_path }}
-            ${{ steps.export.outputs.sha_path }}
+            release-assets/*
